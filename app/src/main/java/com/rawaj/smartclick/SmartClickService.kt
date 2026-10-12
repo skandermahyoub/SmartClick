@@ -13,7 +13,13 @@ class SmartClickService : AccessibilityService() {
 
     private val runner = object : Runnable {
         override fun run() {
-            if (!prefs.getBoolean(KEY_ENABLED, false)) return
+            // Keep checking for a later press of "Start"; do not exit permanently
+            // just because the user had not enabled clicking when the service connected.
+            if (!prefs.getBoolean(KEY_ENABLED, false)) {
+                handler.postDelayed(this, 500L)
+                return
+            }
+
             val target = prefs.getString(KEY_TARGET, "").orEmpty()
             val interval = prefs.getLong(KEY_INTERVAL, 1500L).coerceAtLeast(500L)
             if (target.isNotBlank()) tryClick(target)
@@ -28,7 +34,7 @@ class SmartClickService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // The scheduled runner only acts while the user has explicitly enabled it.
+        // Clicking is controlled by the explicit enabled setting.
     }
 
     private fun tryClick(target: String) {
@@ -42,7 +48,9 @@ class SmartClickService : AccessibilityService() {
                     if (candidate.isClickable && candidate.isEnabled) {
                         val now = System.currentTimeMillis()
                         if (now - lastClickAt >= 450L) {
-                            if (candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) lastClickAt = now
+                            if (candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                                lastClickAt = now
+                            }
                         }
                         candidate.recycle()
                         return
@@ -61,6 +69,8 @@ class SmartClickService : AccessibilityService() {
 
     override fun onInterrupt() {
         handler.removeCallbacks(runner)
+        // Resume checking after an interruption while the service remains connected.
+        handler.postDelayed(runner, 500L)
     }
 
     override fun onDestroy() {
