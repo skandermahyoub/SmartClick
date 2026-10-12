@@ -1,6 +1,9 @@
 package com.rawaj.smartclick
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
@@ -9,12 +12,11 @@ import android.view.accessibility.AccessibilityNodeInfo
 class SmartClickService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var lastClickAt = 0L
+    private var gestureInProgress = false
     private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
 
     private val runner = object : Runnable {
         override fun run() {
-            // Keep checking for a later press of "Start"; do not exit permanently
-            // just because the user had not enabled clicking when the service connected.
             if (!prefs.getBoolean(KEY_ENABLED, false)) {
                 handler.postDelayed(this, 500L)
                 return
@@ -33,43 +35,84 @@ class SmartClickService : AccessibilityService() {
         handler.post(runner)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Clicking is controlled by the explicit enabled setting.
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
 
     private fun tryClick(target: String) {
+        if (gestureInProgress || System.currentTimeMillis() - lastClickAt < 450L) return
         val root = rootInActiveWindow ?: return
         try {
             val nodes = root.findAccessibilityNodeInfosByText(target) ?: return
             for (node in nodes) {
-                if (!node.isVisibleToUser) continue
+                if (!node.isVisibleToUser) {
+                    node.recycle()
+                    continue
+                }
+
                 var candidate: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
+                var clickTarget: AccessibilityNodeInfo? = null
                 while (candidate != null) {
-                    if (candidate.isClickable && candidate.isEnabled) {
-                        val now = System.currentTimeMillis()
-                        if (now - lastClickAt >= 450L) {
-                            if (candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                                lastClickAt = now
-                            }
-                        }
+                    if (candidate.isVisibleToUser && candidate.isEnabled && candidate.isClickable) {
+                        clickTarget = AccessibilityNodeInfo.obtain(candidate)
+                        val clicked = candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                         candidate.recycle()
-                        return
+                        candidate = null
+                        if (clicked) {
+                            lastClickAt = System.currentTimeMillis()
+                            clickTarget.recycle()
+                            node.recycle()
+                            return
+                        }
+                        break
                     }
                     val parent = candidate.parent
                     candidate.recycle()
                     candidate = parent
                 }
+
+                val bounds = Rect()
+                (clickTarget ?: node).getBoundsInScreen(bounds)
+                clickTarget?.recycle()
+                if (bounds.width() > 0 && bounds.height() > 0) {
+                    node.recycle()
+                    dispatchTap(bounds)
+                    return
+                }
+                node.recycle()
             }
         } catch (_: Exception) {
-            // Some apps do not expose their UI hierarchy to accessibility services.
+            // Some apps expose limited accessibility information.
         } finally {
             root.recycle()
         }
     }
 
+    private fun dispatchTap(bounds: Rect) {
+        val x = bounds.centerX().toFloat()
+        val y = bounds.centerY().toFloat()
+        val path = Path().apply {
+            moveTo(x, y)
+            lineTo(x, y)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, 100L))
+            .build()
+
+        gestureInProgress = true
+        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                lastClickAt = System.currentTimeMillis()
+                gestureInProgress = false
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                gestureInProgress = false
+            }
+        }, handler)
+        if (!accepted) gestureInProgress = false
+    }
+
     override fun onInterrupt() {
         handler.removeCallbacks(runner)
-        // Resume checking after an interruption while the service remains connected.
         handler.postDelayed(runner, 500L)
     }
 
